@@ -23,19 +23,43 @@ import (
 )
 
 type rrJob struct {
-	ID               json.Number `json:"id"`
-	RoleTitle        string      `json:"roleTitle"`
-	URL              string      `json:"url"`
-	Slug             string      `json:"slug"`
-	RoleDescription  *string     `json:"roleDescription"`
-	RoleRequirements *string     `json:"roleRequirements"`
+	ID               flexID  `json:"id"`
+	RoleTitle        string  `json:"roleTitle"`
+	URL              string  `json:"url"`
+	Slug             string  `json:"slug"`
+	RoleDescription  *string `json:"roleDescription"`
+	RoleRequirements *string `json:"roleRequirements"`
 	Company          *struct {
-		ID   string `json:"id"`
+		ID   flexID `json:"id"`
 		Name string `json:"name"`
 		Slug string `json:"slug"`
 	} `json:"company"`
 	SalaryRange json.RawMessage `json:"salaryRange"`
 }
+
+// flexID accepts a JSON number or string; the live API sends numeric ids
+// where the spec implies strings.
+type flexID string
+
+func (f *flexID) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		*f = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*f = flexID(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("id: %w", err)
+	}
+	*f = flexID(n.String())
+	return nil
+}
+
+func (f flexID) String() string { return string(f) }
 
 type rrResponse struct {
 	JobOpenings []rrJob `json:"jobOpenings"`
@@ -155,7 +179,7 @@ func salaryFromRaw(raw json.RawMessage) (lo, hi string) {
 	if !ok {
 		return "", ""
 	}
-	var a, b float64
+	var a, b, usdA, usdB float64
 	period, currency := "", ""
 	var walk func(m map[string]any)
 	walk = func(m map[string]any) {
@@ -168,10 +192,14 @@ func salaryFromRaw(raw json.RawMessage) (lo, hi string) {
 			if s, ok := val.(string); ok {
 				switch {
 				case strings.Contains(key, "currency"):
-					currency = strings.ToUpper(s)
+					// a symbol like "$" is ambiguous (CAD, AUD); only use it when no code is given
+					if !strings.Contains(key, "symbol") || currency == "" {
+						currency = strings.ToUpper(s)
+					}
 					continue
 				case strings.Contains(key, "period") || strings.Contains(key, "interval") ||
-					strings.Contains(key, "unit") || strings.Contains(key, "frequency") || key == "per":
+					strings.Contains(key, "unit") || strings.Contains(key, "frequency") || key == "per" ||
+					strings.HasSuffix(key, "type"):
 					period = strings.ToLower(s)
 					continue
 				}
@@ -181,6 +209,10 @@ func salaryFromRaw(raw json.RawMessage) (lo, hi string) {
 				continue
 			}
 			switch {
+			case strings.Contains(key, "asusd") && strings.Contains(key, "min"):
+				usdA = n
+			case strings.Contains(key, "asusd") && strings.Contains(key, "max"):
+				usdB = n
 			case strings.Contains(key, "min") || strings.Contains(key, "from") || strings.Contains(key, "low"):
 				a = n
 			case strings.Contains(key, "max") || key == "to" || strings.HasSuffix(key, "to") || strings.Contains(key, "high"):
@@ -189,7 +221,10 @@ func salaryFromRaw(raw json.RawMessage) (lo, hi string) {
 		}
 	}
 	walk(obj)
-	if currency != "" && currency != "USD" && currency != "$" {
+	if usdA > 0 || usdB > 0 {
+		// the API's own USD conversion; same pay period as the native amounts
+		a, b = usdA, usdB
+	} else if currency != "" && currency != "USD" && currency != "$" {
 		return "", ""
 	}
 	mult := 1.0

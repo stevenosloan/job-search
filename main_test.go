@@ -128,12 +128,36 @@ func TestSalaryFromRawShapes(t *testing.T) {
 		// nested and string-valued amounts
 		`{"salary":{"from":"$150k","to":"$190k"}}`: {"150000", "190000"},
 		`{"max":200000}`: {"200000", ""},
-		`{}`:             {"", ""},
+		// live Remote Rocketship shape (2026-11-23)
+		`{"max":400000,"min":180000,"salaryType":"per year","currencyCode":"USD","currencySymbol":"$","maxSalaryAsUSD":400000,"minSalaryAsUSD":180000,"salaryHumanReadableText":"$180,000 - $400,000 per year"}`: {"180000", "400000"},
+		`{"max":100,"min":80,"salaryType":"per hour","currencyCode":"USD","currencySymbol":"$","maxSalaryAsUSD":100,"minSalaryAsUSD":80}`:                                                                        {"166400", "208000"},
+		// "$" symbol must not mask a non-USD code; the API's USD conversion is used instead
+		`{"max":200000,"min":150000,"salaryType":"per year","currencyCode":"CAD","currencySymbol":"$","maxSalaryAsUSD":145000,"minSalaryAsUSD":109000}`: {"109000", "145000"},
+		`{"max":200000,"min":150000,"currencyCode":"CAD","currencySymbol":"$"}`:                                                                         {"", ""},
+		`{}`: {"", ""},
 	}
 	for in, want := range cases {
 		lo, hi := salaryFromRaw(json.RawMessage(in))
 		if lo != want[0] || hi != want[1] {
 			t.Errorf("%s -> %s,%s want %v", in, lo, hi, want)
 		}
+	}
+}
+
+func TestFlexIDAcceptsNumberAndString(t *testing.T) {
+	var j rrJob
+	in := `{"id":123,"roleTitle":"x","company":{"id":456,"name":"Co"}}`
+	if err := json.Unmarshal([]byte(in), &j); err != nil {
+		t.Fatal(err)
+	}
+	if j.ID != "123" || j.Company.ID != "456" {
+		t.Fatalf("got %q %q", j.ID, j.Company.ID)
+	}
+	in = `{"id":"abc","company":{"id":"def"}}`
+	if err := json.Unmarshal([]byte(in), &j); err != nil {
+		t.Fatal(err)
+	}
+	if j.ID != "abc" || j.Company.ID != "def" {
+		t.Fatalf("got %q %q", j.ID, j.Company.ID)
 	}
 }
