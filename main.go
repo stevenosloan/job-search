@@ -323,9 +323,10 @@ func runScore(args []string) error {
 	cfgPath := fs.String("config", "", "YAML (or JSON) config overriding defaults; default config.yaml if present")
 	out := fs.String("out", "ranked", "output prefix")
 	reviewPaths := fs.String("reviews", "", "comma-separated posting-reviewer JSON files to merge")
+	batchPath := fs.String("batch", "", "review-batch file the reviews were made from; postings in it without a review are listed and written to <batch>-missing.json")
 	fs.Parse(args)
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: jobscan score [-config f] [-out prefix] [-reviews a.json,b.json] postings.json [more.json ...]")
+		return fmt.Errorf("usage: jobscan score [-config f] [-out prefix] [-reviews a.json,b.json [-batch reviews/batch.json]] postings.json [more.json ...]")
 	}
 	c, err := loadConfig(configPath(*cfgPath))
 	if err != nil {
@@ -342,6 +343,13 @@ func runScore(args []string) error {
 			return err
 		}
 		ranked = applyReviews(ranked, reviews)
+		if *batchPath != "" {
+			if err := checkBatchCoverage(*batchPath, reviews); err != nil {
+				return err
+			}
+		}
+	} else if *batchPath != "" {
+		return fmt.Errorf("-batch needs -reviews")
 	}
 
 	cf, err := os.Create(*out + ".csv")

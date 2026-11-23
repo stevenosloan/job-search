@@ -176,3 +176,57 @@ func buildBatch(ranked []Result, top, maxDesc int) []batchItem {
 	}
 	return items
 }
+
+// missingFromBatch returns the batch items that have no review.
+func missingFromBatch(items []batchItem, reviews map[string]Review) []batchItem {
+	var miss []batchItem
+	for _, it := range items {
+		if _, ok := reviews[it.URL]; !ok {
+			miss = append(miss, it)
+		}
+	}
+	return miss
+}
+
+// missingPath turns reviews/batch.json into reviews/batch-missing.json.
+func missingPath(batch string) string {
+	ext := filepath.Ext(batch)
+	return strings.TrimSuffix(batch, ext) + "-missing" + ext
+}
+
+// checkBatchCoverage warns about batch postings the reviewer skipped (it can
+// report success while writing fewer objects, or alter a URL) and writes them
+// to <batch>-missing.json for a re-run. A stale missing file is removed when
+// coverage is complete.
+func checkBatchCoverage(batch string, reviews map[string]Review) error {
+	b, err := os.ReadFile(batch)
+	if err != nil {
+		return err
+	}
+	var items []batchItem
+	if err := json.Unmarshal(b, &items); err != nil {
+		return fmt.Errorf("%s: %w", batch, err)
+	}
+	miss := missingFromBatch(items, reviews)
+	out := missingPath(batch)
+	if len(miss) == 0 {
+		if err := os.Remove(out); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "reviews cover all %d postings in %s\n", len(items), batch)
+		return nil
+	}
+	mb, err := json.MarshalIndent(miss, "", " ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(out, append(mb, '\n'), 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "warning: %d of %d postings in %s have no review; re-run the reviewer on %s:\n",
+		len(miss), len(items), batch, out)
+	for _, m := range miss {
+		fmt.Fprintf(os.Stderr, "  %s: %s (%s)\n", m.Company, m.Title, m.URL)
+	}
+	return nil
+}

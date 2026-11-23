@@ -79,3 +79,35 @@ func TestMdCell(t *testing.T) {
 		t.Errorf("mdCell = %q", got)
 	}
 }
+
+func TestCheckBatchCoverage(t *testing.T) {
+	dir := t.TempDir()
+	batch := filepath.Join(dir, "batch.json")
+	os.WriteFile(batch, []byte(`[{"url":"a","company":"A"},{"url":"b","company":"B"},{"url":"c","company":"C"}]`), 0o644)
+	missing := filepath.Join(dir, "batch-missing.json")
+	if missingPath(batch) != missing {
+		t.Fatalf("missingPath = %s", missingPath(batch))
+	}
+
+	// Reviewer skipped b and altered c's URL.
+	reviews := map[string]Review{"a": {URL: "a"}, "c-typo": {URL: "c-typo"}}
+	if err := checkBatchCoverage(batch, reviews); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(b); !strings.Contains(s, `"url": "b"`) || !strings.Contains(s, `"url": "c"`) || strings.Contains(s, `"url": "a"`) {
+		t.Errorf("missing file:\n%s", s)
+	}
+
+	// Full coverage removes the stale missing file.
+	reviews["b"], reviews["c"] = Review{URL: "b"}, Review{URL: "c"}
+	if err := checkBatchCoverage(batch, reviews); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Errorf("stale missing file kept: %v", err)
+	}
+}
