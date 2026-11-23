@@ -45,17 +45,22 @@ type Config struct {
 	GrowthTerms  []string `json:"growth_terms"`
 	StackTerms   []string `json:"stack_terms"`
 	SeniorTerms  []string `json:"senior_terms"`
+	// MissionWeight is points per mission term hit (up to 4 hits).
+	MissionWeight int `json:"mission_weight"`
+	// NoMissionPenalty is subtracted when a posting matches no mission term.
+	NoMissionPenalty int `json:"no_mission_penalty"`
 }
 
 func defaultConfig() Config {
 	return Config{
 		SalaryFloor: 170000, SizeMin: 150, SizeMax: 500,
-		ExcludeTerms: []string{"carbon credit", "carbon offset", "offset marketplace", "carbon marketplace", "credit marketplace", "carbon removal marketplace"},
-		MissionTerms: []string{"land", "conservation", "forest", "soil", "agricultur", "wildlife", "watershed", "ecosystem", "restoration", "habitat", "regenerative", "biodiversity"},
-		ProductTerms: []string{"product", "customer", "users", "roadmap", "product manager", "design"},
-		GrowthTerms:  []string{"growth", "marketing", "acquisition", "seo", "experimentation", "funnel"},
-		StackTerms:   []string{"typescript", "react", "node", "postgres", "aws", "performance", "observability", "playwright", "design system", "accessibility", "analytics"},
-		SeniorTerms:  []string{"senior", "staff", "principal", "lead"},
+		ExcludeTerms:  []string{"carbon credit", "carbon offset", "offset marketplace", "carbon marketplace", "credit marketplace", "carbon removal marketplace"},
+		MissionTerms:  []string{"land", "conservation", "forest", "soil", "agricultur", "wildlife", "watershed", "ecosystem", "restoration", "habitat", "regenerative", "biodiversity"},
+		ProductTerms:  []string{"product", "customer", "users", "roadmap", "product manager", "design"},
+		GrowthTerms:   []string{"growth", "marketing", "acquisition", "seo", "experimentation", "funnel"},
+		StackTerms:    []string{"typescript", "react", "node", "postgres", "aws", "performance", "observability", "playwright", "design system", "accessibility", "analytics"},
+		SeniorTerms:   []string{"senior", "staff", "principal", "lead"},
+		MissionWeight: 6, NoMissionPenalty: 0,
 	}
 }
 
@@ -194,9 +199,12 @@ func score(j Job, c Config) (r Result, ok bool, reason string) {
 		flags = append(flags, "size "+j.Size+" outside range")
 	}
 	m := hits(text, c.MissionTerms)
-	pts += min(len(m), 4) * 6
+	pts += min(len(m), 4) * c.MissionWeight
 	if len(m) > 0 {
 		why = append(why, "mission: "+strings.Join(first(m, 4), ", "))
+	} else if c.NoMissionPenalty > 0 {
+		pts -= c.NoMissionPenalty
+		flags = append(flags, "no mission match")
 	}
 	pts += min(len(hits(text, c.ProductTerms)), 3) * 3
 	if g := hits(text, c.GrowthTerms); len(g) > 0 {
@@ -209,6 +217,20 @@ func score(j Job, c Config) (r Result, ok bool, reason string) {
 		why = append(why, "stack: "+strings.Join(first(s, 5), ", "))
 	}
 	return Result{pts, j, strings.Join(why, "; "), strings.Join(flags, "; ")}, true, ""
+}
+
+// companyKey normalizes a company name for dedupe, so "Afresh" and
+// "Afresh Technologies, Inc." collapse to the same key.
+func companyKey(name string) string {
+	k := strings.ToLower(strings.TrimSpace(name))
+	k = strings.NewReplacer(",", " ", ".", " ").Replace(k)
+	words := strings.Fields(k)
+	suffix := map[string]bool{"inc": true, "llc": true, "ltd": true, "corp": true, "corporation": true,
+		"co": true, "company": true, "technologies": true, "technology": true, "gmbh": true, "pbc": true}
+	for len(words) > 1 && suffix[words[len(words)-1]] {
+		words = words[:len(words)-1]
+	}
+	return strings.Join(words, " ")
 }
 
 func runScore(args []string) error {
@@ -249,7 +271,7 @@ func runScore(args []string) error {
 	}
 	var dropped []drop
 	for _, j := range jobs {
-		key := strings.ToLower(j.Company) + "|" + strings.ToLower(j.Title)
+		key := companyKey(j.Company) + "|" + strings.ToLower(strings.TrimSpace(j.Title))
 		if seen[key] {
 			continue
 		}

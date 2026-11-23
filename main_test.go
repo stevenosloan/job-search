@@ -161,3 +161,39 @@ func TestFlexIDAcceptsNumberAndString(t *testing.T) {
 		t.Fatalf("got %q %q", j.ID, j.Company.ID)
 	}
 }
+
+func TestScoreMissionWeightAndPenalty(t *testing.T) {
+	c := defaultConfig()
+	c.MissionTerms = []string{"soil"}
+	c.MissionWeight, c.NoMissionPenalty = 10, 25
+	base := Job{Title: "Senior Engineer", Company: "X", SalaryMax: json.RawMessage(`200000`), Size: "201-500"}
+	climate := base
+	climate.Description = "soil health maps"
+	rc, _, _ := score(climate, c)
+	rg, _, _ := score(base, c)
+	if rc.Score-rg.Score != 35 {
+		t.Errorf("want 35-point gap (10 mission + 25 penalty), got %d vs %d", rc.Score, rg.Score)
+	}
+	if rg.Flags != "no mission match" {
+		t.Errorf("flags = %q", rg.Flags)
+	}
+	// Defaults keep the old behaviour: 6 per hit, no penalty.
+	d := defaultConfig()
+	d.MissionTerms = []string{"soil"}
+	dc, _, _ := score(climate, d)
+	dg, _, _ := score(base, d)
+	if dc.Score-dg.Score != 6 || dg.Flags != "" {
+		t.Errorf("defaults changed: %d vs %d, flags %q", dc.Score, dg.Score, dg.Flags)
+	}
+}
+
+func TestCompanyKey(t *testing.T) {
+	for _, n := range []string{"Afresh", "Afresh Technologies", "afresh technologies, inc.", " Afresh LLC "} {
+		if k := companyKey(n); k != "afresh" {
+			t.Errorf("companyKey(%q) = %q", n, k)
+		}
+	}
+	if k := companyKey("Technologies"); k != "technologies" {
+		t.Errorf("single-word name stripped: %q", k)
+	}
+}
