@@ -197,3 +197,28 @@ func TestCompanyKey(t *testing.T) {
 		t.Errorf("single-word name stripped: %q", k)
 	}
 }
+
+func TestLoadConfigYAMLAndJSON(t *testing.T) {
+	dir := t.TempDir()
+	y := filepath.Join(dir, "c.yaml")
+	os.WriteFile(y, []byte("# comment\nmission_weight: 9\nmission_terms:\n  - soil\n"), 0o644)
+	c, err := loadConfig(y)
+	if err != nil || c.MissionWeight != 9 || len(c.MissionTerms) != 1 || c.SalaryFloor != 170000 {
+		t.Fatalf("yaml: %+v %v", c, err)
+	}
+	j := filepath.Join(dir, "c.json")
+	os.WriteFile(j, []byte(`{"no_mission_penalty": 5}`), 0o644)
+	if c, err := loadConfig(j); err != nil || c.NoMissionPenalty != 5 || c.MissionWeight != 6 {
+		t.Fatalf("json: %+v %v", c, err)
+	}
+	bad := filepath.Join(dir, "bad.yaml")
+	os.WriteFile(bad, []byte("misson_weight: 9\n"), 0o644)
+	if _, err := loadConfig(bad); err == nil {
+		t.Fatal("unknown key accepted")
+	}
+	empty := filepath.Join(dir, "empty.yaml")
+	os.WriteFile(empty, nil, 0o644)
+	if c, err := loadConfig(empty); err != nil || c.MissionWeight != 6 {
+		t.Fatalf("empty: %+v %v", c, err)
+	}
+}

@@ -5,13 +5,14 @@ description: Find and rank climate/mission-driven senior software engineering jo
 
 # Climate job search
 
-Finds and ranks postings against the user's resume and criteria. Two sources, two methods, one scoring step.
+Finds and ranks postings against the user's resume and criteria. Two sources, two methods, a keyword scoring pass, then a Haiku review of the shortlist.
 
 ## The tool
-`jobscan` is the user's small Go program in this repo (files: `main.go`, `rr.go`, `main_test.go`, `go.mod`; no dependencies, Go 1.21+). It has three commands:
+`jobscan` is the user's small Go program in this repo (files: `main.go`, `rr.go`, `review.go`, `main_test.go`, `review_test.go`, `go.mod`, `go.sum`; one dependency, gopkg.in/yaml.v3; Go 1.21+). It has four commands:
 - `jobscan climatebase-url [-sizes 101-250,251-500] [-sectors "Food, Agriculture, & Land Use"] [-nonprofit] [-junior]` prints a filtered Climatebase URL.
 - `jobscan fetch-rr [flags]` pulls Remote Rocketship postings through its API into `postings-rr.json`.
-- `jobscan score [-config config.json] [-out ranked] postings.json [more.json ...]` dedupes, drops exclusions (carbon credit/offset marketplaces), scores and writes `ranked.md` / `ranked.csv`.
+- `jobscan review-batch [-top 30] [-max-desc 6000] [-out reviews/batch.json] postings.json [more.json ...]` writes the keyword top N, with truncated descriptions and `keyword_score`, for the reviewer agent.
+- `jobscan score [-config config.yaml] [-out ranked] [-reviews a.json,b.json] postings.json [more.json ...]` dedupes, drops exclusions (carbon credit/offset marketplaces), scores and writes `ranked.md` / `ranked.csv`. With `-reviews`, reviewed postings rank first by the reviewer's `fit`, then the rest by keyword score.
 
 Build with `go test ./... && go build -o jobscan .`. If the source is not in the session, ask the user to attach the files or connect the folder that holds them.
 
@@ -20,7 +21,7 @@ Build with `go test ./... && go build -o jobscan .`. If the source is not in the
 - Company size 150-500, mission-focused. Base salary at least $170,000 (unposted pay is unknown, not a fail).
 - Exclude carbon credit / offset marketplaces and similar.
 - Interest order: land management and conservation, agriculture/soil/forestry, then other climate sectors.
-- Resume: ask for the file if it is not attached; use it to set `stack_terms` in config.json.
+- Resume: ask for the file if it is not attached; use it to set `stack_terms` in config.yaml.
 
 ## Remote Rocketship (API, run by the USER)
 The workspace shell may not reach remoterocketship.com, and the API key is the user's. Never ask for, paste, or write the key, and never read, print, or edit `.env`.
@@ -44,6 +45,11 @@ Climatebase is behind a bot check that only a real signed-in browser passes, and
 5. Record postings as JSON (`title, company, location, remote, salary_min, salary_max, size, url, source:"climatebase", description`) in `postings-cb.json`. Use real values; omit unknown fields. Salary may be a number or a string like "$165k".
 
 ## Score and report
-1. `./jobscan score -out ranked postings-cb.json postings-rr.json` (optional `-config config.json`; keys: `salary_floor`, `size_min`, `size_max`, `exclude_terms`, `mission_terms`, `product_terms`, `growth_terms`, `stack_terms`, `senior_terms`; missing keys keep defaults).
-2. The score is a keyword first pass. Read the top results against the resume yourself, verify size/pay on the source page, and say what is unverified.
-3. Report a short ranked list: role, company, size, pay, why it fits, gaps vs the resume, deadline if any, link. Be candid when supply is thin or pay is under the floor.
+1. `./jobscan score -out ranked postings-cb.json postings-rr.json` (reads `config.yaml` when present, or `-config <file>`; JSON also parses. Keys: `salary_floor`, `size_min`, `size_max`, `exclude_terms`, `mission_terms`, `product_terms`, `growth_terms`, `stack_terms`, `senior_terms`, `mission_weight`, `no_mission_penalty`; missing keys keep defaults, unknown keys are an error). Mission terms are substring matches: prefer phrases that can't hide inside other words ("ranch" matches "branch").
+2. The keyword score is a cheap first pass. Review the shortlist with the `posting-reviewer` agent (`.claude/agents/posting-reviewer.md`, model haiku, tools Read and Write):
+   - `./jobscan review-batch -top 30 -out reviews/batch.json postings-cb.json postings-rr.json` (same inputs as step 1).
+   - Run the agent with the batch path, `resume.md`, and `reviews/reviews.json` as the output. If the agent type is not registered in the session (it loads at session start), run a general-purpose agent with `model: haiku` and tell it to read and follow that file. Above ~40 postings, split into batches of 30 and run them in parallel, one output file each.
+   - `./jobscan score -out ranked -reviews reviews/reviews.json postings-cb.json postings-rr.json` (comma-separate several review files). Warnings list reviews whose URL matched no posting.
+   - `reviews/` is gitignored and holds Remote Rocketship-derived text: keep it local like `postings-rr.json`, and don't reuse old reviews to skip postings on later runs.
+3. Haiku's verdicts are a second opinion, not verification. Read the top results against the resume yourself, spot-check the reviewer's claims (location, pay, stack) against the posting, verify size/pay on the source page, and say what is unverified. Known slip: it marks "Remote within the Americas" style locations as unknown.
+4. Report a short ranked list: role, company, size, pay, why it fits, gaps vs the resume, deadline if any, link. Be candid when supply is thin or pay is under the floor.
