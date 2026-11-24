@@ -2,11 +2,11 @@
 //
 //	jobscan boards [-files]             (boards in the config and their postings files)
 //	jobscan climatebase-url [-sizes 101-250,251-500] [-sectors "A"] [-nonprofit] [-junior]
-//	jobscan fetch-rr [flags]            (needs RR_API_KEY; see rr.go)
+//	jobscan fetch-rr [flags]            (needs RR_API_KEY; see boards/remoterocketship)
 //	jobscan review-batch [-top 30] [-out reviews/batch.json] [postings.json ...]
 //	jobscan score [-config f] [-out ranked] [-reviews r.json] [postings.json ...]
 //
-// Every command reads the per-user config (see configPath in boards.go);
+// Every command reads the per-user config (see configPath in config.go);
 // flag defaults for climatebase-url and fetch-rr come from its boards section.
 // Without postings files, score and review-batch use the enabled boards' files.
 //
@@ -20,82 +20,17 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
-	"net/url"
 	"os"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"jobscan/boards"
 )
 
-type Job struct {
-	Title       string          `json:"title"`
-	Company     string          `json:"company"`
-	Location    string          `json:"location"`
-	Remote      any             `json:"remote"`
-	SalaryMin   json.RawMessage `json:"salary_min"`
-	SalaryMax   json.RawMessage `json:"salary_max"`
-	Size        string          `json:"size"`
-	URL         string          `json:"url"`
-	Source      string          `json:"source"`
-	Description string          `json:"description"`
-}
-
-type Config struct {
-	SalaryFloor  int      `json:"salary_floor" yaml:"salary_floor"`
-	SizeMin      int      `json:"size_min" yaml:"size_min"`
-	SizeMax      int      `json:"size_max" yaml:"size_max"`
-	ExcludeTerms []string `json:"exclude_terms" yaml:"exclude_terms"`
-	MissionTerms []string `json:"mission_terms" yaml:"mission_terms"`
-	ProductTerms []string `json:"product_terms" yaml:"product_terms"`
-	GrowthTerms  []string `json:"growth_terms" yaml:"growth_terms"`
-	StackTerms   []string `json:"stack_terms" yaml:"stack_terms"`
-	SeniorTerms  []string `json:"senior_terms" yaml:"senior_terms"`
-	// MissionTerms describe the companies or missions the user cares about.
-	// MissionWeight is points per mission term hit (up to 4 hits).
-	MissionWeight int `json:"mission_weight" yaml:"mission_weight"`
-	// NoMissionPenalty is subtracted when a posting matches no mission term.
-	NoMissionPenalty int `json:"no_mission_penalty" yaml:"no_mission_penalty"`
-	// Candidate is the profile the posting-reviewer judges against.
-	Candidate Candidate `json:"candidate" yaml:"candidate"`
-	// Boards picks the job boards to search and their filters.
-	Boards Boards `json:"boards" yaml:"boards"`
-}
-
-func defaultConfig() Config {
-	return Config{
-		SalaryFloor: 170000, SizeMin: 150, SizeMax: 500,
-		ProductTerms:  []string{"product", "customer", "users", "roadmap", "product manager", "design"},
-		GrowthTerms:   []string{"growth", "marketing", "acquisition", "seo", "experimentation", "funnel"},
-		StackTerms:    []string{"typescript", "react", "node", "postgres", "aws", "performance", "observability", "playwright", "design system", "accessibility", "analytics"},
-		SeniorTerms:   []string{"senior", "staff", "principal", "lead"},
-		MissionWeight: 6, NoMissionPenalty: 0,
-		Boards: defaultBoards(),
-	}
-}
-
-const cbCategories = "Software & IT:Back-end Engineering,DevOps,Front-end Engineering,Full-stack Engineering,Engineering Manager, Software,Software Architecture,Security Engineering"
-
-func climatebaseURL(sizes, sectors string, nonprofit, junior bool) string {
-	level := "Senior Level"
-	if junior {
-		level = "Junior Level"
-	}
-	p := []string{"experience_levels=" + url.QueryEscape(level), "categories=" + url.QueryEscape(cbCategories)}
-	if sectors != "" {
-		p = append(p, "sectors="+url.QueryEscape(sectors))
-	}
-	if sizes != "" {
-		p = append(p, "organization_size="+url.QueryEscape(strings.ReplaceAll(sizes, ",", "|")))
-	}
-	if nonprofit {
-		p = append(p, "organization_type=Nonprofit")
-	}
-	return "https://climatebase.org/jobs?" + strings.Join(p, "&")
-}
+// Job is a posting in the shared postings format (see boards.Job).
+type Job = boards.Job
 
 var numRe = regexp.MustCompile(`\d[\d,]*`)
 
@@ -247,30 +182,6 @@ func companyKey(name string) string {
 	return strings.Join(words, " ")
 }
 
-// loadConfig reads a YAML config (JSON also parses, as a YAML subset) over
-// the defaults. Missing keys keep defaults; unknown keys are an error so a
-// typo cannot silently fall back to a default. An empty path means defaults.
-func loadConfig(path string) (Config, error) {
-	c := defaultConfig()
-	if path == "" {
-		return c, nil
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return c, err
-	}
-	defer f.Close()
-	dec := yaml.NewDecoder(f)
-	dec.KnownFields(true)
-	if err := dec.Decode(&c); err != nil && err != io.EOF {
-		return c, fmt.Errorf("%s: %w", path, err)
-	}
-	if err := c.checkBoards(); err != nil {
-		return c, fmt.Errorf("%s: %w", path, err)
-	}
-	return c, nil
-}
-
 func loadJobs(paths []string) ([]Job, error) {
 	var jobs []Job
 	for _, path := range paths {
@@ -396,26 +307,6 @@ func runScore(args []string) error {
 		return err
 	}
 	fmt.Printf("%d ranked, %d excluded -> %s.md / %s.csv\n", len(ranked), len(dropped), *out, *out)
-	return nil
-}
-
-func runClimatebaseURL(args []string) error {
-	c, _, err := resolveConfig(configFlag(args))
-	if err != nil {
-		return err
-	}
-	cb := c.Boards.Climatebase
-	if !cb.Enabled {
-		fmt.Fprintln(os.Stderr, "note: climatebase is disabled in the config")
-	}
-	fs := flag.NewFlagSet("climatebase-url", flag.ExitOnError)
-	fs.String("config", "", "config file (defaults below come from boards.climatebase)")
-	sizes := fs.String("sizes", strings.Join(cb.Sizes, ","), "org size bands, comma-separated")
-	sectors := fs.String("sectors", strings.Join(cb.Sectors, "|"), "sector names, | separated")
-	np := fs.Bool("nonprofit", cb.Nonprofit, "nonprofits only")
-	jr := fs.Bool("junior", false, "junior level")
-	fs.Parse(args)
-	fmt.Println(climatebaseURL(*sizes, *sectors, *np, *jr))
 	return nil
 }
 

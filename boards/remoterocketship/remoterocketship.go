@@ -1,11 +1,11 @@
-package main
-
-// Remote Rocketship API client (POST /api/openclaw/jobs/).
+// Package remoterocketship is the Remote Rocketship board adapter: an API
+// client (POST /api/openclaw/jobs/).
 // Spec: https://www.remoterocketship.com/openapi.json
 // Quota (standard plan): 500 requests or 3,000 jobs per UTC day, whichever first.
 // The key is read from the RR_API_KEY environment variable, or, if that is unset,
 // from RR_API_KEY in a .env file (-env-file). It is never accepted as a flag,
 // logged, or written by this tool.
+package remoterocketship
 
 import (
 	"bytes"
@@ -20,7 +20,43 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"jobscan/boards"
 )
+
+// Config is boards.remote_rocketship in the jobscan config; it sets
+// fetch-rr's flag defaults.
+type Config struct {
+	Enabled    bool     `json:"enabled" yaml:"enabled"`
+	Out        string   `json:"out" yaml:"out"`
+	Titles     []string `json:"titles" yaml:"titles"`
+	Locations  []string `json:"locations" yaml:"locations"`
+	Seniority  []string `json:"seniority" yaml:"seniority"`
+	Sizes      []string `json:"sizes" yaml:"sizes"` // each "min,max" is its own request series
+	Keywords   []string `json:"keywords" yaml:"keywords"`
+	Exclude    []string `json:"exclude" yaml:"exclude"`
+	Tech       []string `json:"tech" yaml:"tech"`
+	Industries []string `json:"industries" yaml:"industries"`
+	MinSalary  int      `json:"min_salary" yaml:"min_salary"`
+	MaxPages   int      `json:"max_pages" yaml:"max_pages"`
+	MaxJobs    int      `json:"max_jobs" yaml:"max_jobs"`
+}
+
+// Default is the board's built-in config.
+func Default() Config {
+	return Config{
+		Enabled: true, Out: "postings-rr.json",
+		Titles:    []string{"Software Engineer", "Frontend Engineer", "Full Stack Engineer"},
+		Locations: []string{"United States"}, Seniority: []string{"senior", "expert"},
+		Sizes:     []string{"51,200", "201,500"},
+		MinSalary: 170000, MaxPages: 6, MaxJobs: 1000,
+	}
+}
+
+// Info summarizes the board for `jobscan boards`.
+func (b Config) Info() boards.Info {
+	return boards.Info{Name: "remote_rocketship", Method: "API (user runs it)", Out: b.Out, Enabled: b.Enabled, Detail: "./jobscan fetch-rr"}
+}
 
 type rrJob struct {
 	ID               flexID  `json:"id"`
@@ -110,16 +146,6 @@ func loadKeyFromDotEnv(path string) error {
 		}
 	}
 	return nil
-}
-
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 var salaryTok = regexp.MustCompile(`(?i)\d[\d,]*\.?\d*\s*k?`)
@@ -265,7 +291,7 @@ func salaryShape(raw json.RawMessage) string {
 	return "{" + strings.Join(keys, ",") + "}"
 }
 
-func toJob(j rrJob, sizeLabel string) Job {
+func toJob(j rrJob, sizeLabel string) boards.Job {
 	desc := ""
 	if j.RoleDescription != nil {
 		desc += *j.RoleDescription
@@ -274,7 +300,7 @@ func toJob(j rrJob, sizeLabel string) Job {
 		desc += "\n" + *j.RoleRequirements
 	}
 	lo, hi := salaryFromRaw(j.SalaryRange)
-	job := Job{Title: j.RoleTitle, URL: j.URL, Source: "remoterocketship", Size: sizeLabel,
+	job := boards.Job{Title: j.RoleTitle, URL: j.URL, Source: "remoterocketship", Size: sizeLabel,
 		Description: desc, Remote: true}
 	if j.Company != nil {
 		job.Company = j.Company.Name
@@ -296,15 +322,8 @@ func bandLabel(b string) string {
 	return strings.ReplaceAll(b, ",", "-")
 }
 
-func runFetchRR(args []string) error {
-	c, _, err := resolveConfig(configFlag(args))
-	if err != nil {
-		return err
-	}
-	rb := c.Boards.RemoteRocketship
-	if !rb.Enabled {
-		fmt.Fprintln(os.Stderr, "note: remote_rocketship is disabled in the config")
-	}
+// Run is `jobscan fetch-rr`: flags default to rb and override it.
+func Run(args []string, rb Config) error {
 	j := func(l []string) string { return strings.Join(l, ",") }
 	fs := flag.NewFlagSet("fetch-rr", flag.ExitOnError)
 	fs.String("config", "", "config file (defaults below come from boards.remote_rocketship)")
@@ -369,7 +388,7 @@ func runFetchRR(args []string) error {
 		return fmt.Errorf("set RR_API_KEY in the environment or in %s (from your Remote Rocketship account page)", *envFile)
 	}
 
-	var all []Job
+	var all []boards.Job
 	seen := map[string]bool{}
 	requests, jobsReturned := 0, 0
 	remaining := -1                    // X-JobLimit-Remaining, when the server reports it
@@ -388,8 +407,8 @@ func runFetchRR(args []string) error {
 			}
 			filters := map[string]any{
 				"page": page, "itemsPerPage": 50, "sortBy": "DateAdded",
-				"jobTitleFilters": splitList(*titles), "locationFilters": splitList(*locations),
-				"seniorityFilters": splitList(*seniority), "employmentTypeFilters": []string{"full-time"},
+				"jobTitleFilters": boards.SplitList(*titles), "locationFilters": boards.SplitList(*locations),
+				"seniorityFilters": boards.SplitList(*seniority), "employmentTypeFilters": []string{"full-time"},
 				"hideGhostJobsFilter": "true", "showRemoteJobs": true,
 				"minSalaryFilter": *minSalary, "showJobsWithoutSalaryWithMinSalaryFilter": true,
 			}
@@ -398,7 +417,7 @@ func runFetchRR(args []string) error {
 			}
 			for k, v := range map[string]string{"keywordFilters": *keywords, "excludedKeywordFilters": *exclude,
 				"techStackFilters": *tech, "industriesFilters": *industries} {
-				if l := splitList(v); len(l) > 0 {
+				if l := boards.SplitList(v); len(l) > 0 {
 					filters[k] = l
 				}
 			}

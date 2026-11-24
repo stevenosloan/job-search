@@ -8,7 +8,7 @@ description: Find and rank software engineering jobs against the user's resume a
 Finds and ranks postings against the user's resume and the criteria they set in their config (what they want, what they won't do, which missions or industries interest them). The boards come from the user's config; then a keyword scoring pass and a Haiku review of the shortlist.
 
 ## The tool
-`jobscan` is the user's small Go program in this repo (files: `main.go`, `rr.go`, `review.go`, `boards.go` and their `_test.go` files, `go.mod`, `go.sum`; one dependency, gopkg.in/yaml.v3; Go 1.21+). It has five commands:
+`jobscan` is the user's small Go program in this repo (files: `main.go`, `config.go`, `boards.go`, `review.go`, one package per built-in board under `boards/<name>` (shared types in `boards/`), their `_test.go` files, `go.mod`, `go.sum`; one dependency, gopkg.in/yaml.v3; Go 1.21+). It has five commands:
 - `jobscan boards [-files]` lists the configured boards: on/off, how each is collected, its postings file and whether that file exists. `-files` prints only the enabled boards' existing files.
 - `jobscan climatebase-url [-sizes 101-250,251-500] [-sectors "..."] [-nonprofit] [-junior]` prints a filtered URL for Climatebase, a climate-sector board (off by default); defaults come from `boards.climatebase`.
 - `jobscan fetch-rr [flags]` pulls Remote Rocketship postings through its API; flag defaults come from `boards.remote_rocketship`.

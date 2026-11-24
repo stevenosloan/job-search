@@ -161,15 +161,21 @@ go vet ./... && go test ./...
 
 GitHub Actions (`.github/workflows/test.yml`) runs gofmt, vet, tests and a build on pull requests and pushes to `main`, on Go 1.21 and the current release.
 
+To add built-in support for a board, add a `boards/<name>` package with a `Config` struct, `Default()`, an `Info()` method and, if it has a command, `Run(args, Config)`. Then register it in `Boards`, `defaultBoards` and `boardList` in the root `boards.go`. Most boards don't need this: a `browser:` entry in the config is enough.
+
 Tests never read your real config or `.env`: `TestMain` points `JOBSCAN_CONFIG` at an empty file, and tests that need an env file use a temporary one.
 
 The project files:
 
 | File | Contents |
 |---|---|
-| `main.go` | Scoring |
-| `rr.go` | Remote Rocketship client |
+| `main.go` | Commands and scoring |
+| `config.go` | Config lookup and loading, candidate criteria |
+| `boards.go` | Board registry, `jobscan boards`, default input files |
+| `boards/` | Shared postings format (`Job`) and board summary (`Info`) |
+| `boards/climatebase/` | Climatebase adapter (URL builder) |
+| `boards/remoterocketship/` | Remote Rocketship adapter (API client) |
+| `boards/browser/` | Other browser boards |
 | `review.go` | Review batches and merging reviews |
-| `boards.go` | Config lookup, boards and criteria |
 | `.claude/skills/job-search/SKILL.md` | The skill |
 | `.claude/agents/posting-reviewer.md` | The reviewer agent |
