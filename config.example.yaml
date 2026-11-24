@@ -1,0 +1,83 @@
+# jobscan config template. Copy it to config.yaml (gitignored) or
+# ~/.config/jobscan/config.yaml and fill it in with your own criteria.
+# jobscan reads -config, then $JOBSCAN_CONFIG, then ./config.yaml, then
+# ~/.config/jobscan/config.yaml. Missing keys keep the built-in defaults;
+# unknown keys are an error.
+#
+# Term lists match case-insensitively at the start of a word ("soil" matches
+# "soils"), so prefer phrases that can't turn up in unrelated text.
+
+salary_floor: 150000      # base pay you need; unposted pay counts as unknown
+size_min: 50              # preferred company size range
+size_max: 1000
+
+# Postings matching any of these are dropped (industries, business models or
+# companies you won't work for).
+exclude_terms: []
+
+# Points per mission term matched (up to 4), and points taken off postings that
+# match none. Set no_mission_penalty to 0 if mission doesn't matter to you.
+mission_weight: 6
+no_mission_penalty: 0
+
+# What the companies you want to work for do: industries, problems, customers.
+# Group them in your order of interest; examples:
+#   - "public health"
+#   - "k-12"
+#   - "open source"
+mission_terms: []
+
+senior_terms: ["senior", "sr.", "staff", "principal", "lead"]
+product_terms: ["product", "customer", "users", "roadmap", "product manager", "design"]
+growth_terms: ["growth", "marketing", "acquisition", "seo", "experimentation", "funnel"]
+
+# Your stack, from your resume.
+stack_terms:
+  - "typescript"
+  - "react"
+  - "node"
+  - "postgres"
+  - "aws"
+
+# Who the posting-reviewer judges for. review-batch renders this, with
+# salary_floor, size_min/size_max and exclude_terms, into reviews/criteria.md.
+candidate:
+  roles: "Senior or staff software engineer. Prefers product engineering over growth engineering."
+  strengths: "TypeScript, React, Node, web performance, design systems. Comfortable full-stack."
+  not_a_fit: "Robotics, embedded, ML research, hardware, or pure infrastructure/SRE engineering."
+  location: "Lives in <city>, <country>. Needs remote in <country>, or an office reachable from <city>."
+  interests:              # in order; the position is the reviewer's mission_tier
+    - "<your top interest>"
+    - "<your next interest>"
+  notes: ""
+
+# Job boards to search. `jobscan boards` lists them; score and review-batch
+# read the enabled boards' `out` files when given no postings files.
+# Keep `out` names matching postings-*.json so they stay gitignored.
+boards:
+  remote_rocketship:      # remote-jobs API; you run `jobscan fetch-rr` with your key
+    enabled: false
+    out: postings-rr.json
+    titles: ["Software Engineer", "Frontend Engineer", "Full Stack Engineer"]
+    locations: ["United States"]
+    seniority: ["senior", "expert"]
+    sizes: ["51,200", "201,500"]
+    keywords: []
+    exclude: []
+    tech: []
+    industries: []
+    min_salary: 150000
+    max_pages: 6
+    max_jobs: 1000
+  climatebase:            # climate-sector board, read in the browser by Claude
+    enabled: false
+    out: postings-cb.json
+    sizes: ["101-250", "251-500"]
+    sectors: []
+    nonprofit: false
+  browser:                # any other board Claude reads in the browser
+    - name: example-board
+      enabled: false
+      url: https://example.com/jobs
+      out: postings-example.json
+      notes: "how to filter it, e.g. 'Engineering category, Remote US'"

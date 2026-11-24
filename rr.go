@@ -297,19 +297,29 @@ func bandLabel(b string) string {
 }
 
 func runFetchRR(args []string) error {
+	c, _, err := resolveConfig(configFlag(args))
+	if err != nil {
+		return err
+	}
+	rb := c.Boards.RemoteRocketship
+	if !rb.Enabled {
+		fmt.Fprintln(os.Stderr, "note: remote_rocketship is disabled in the config")
+	}
+	j := func(l []string) string { return strings.Join(l, ",") }
 	fs := flag.NewFlagSet("fetch-rr", flag.ExitOnError)
-	titles := fs.String("titles", "Software Engineer,Frontend Engineer,Full Stack Engineer", "jobTitleFilters, comma-separated")
-	locations := fs.String("locations", "United States", "locationFilters")
-	seniority := fs.String("seniority", "senior,expert", "entry-level,junior,mid,senior,expert")
-	bands := fs.String("sizes", "51,200;201,500", "companySizeFilters bands separated by ';' (each band is its own request series)")
-	keywords := fs.String("keywords", "", "required keywords (AND)")
-	exclude := fs.String("exclude", "carbon credit,carbon offset,carbon marketplace", "excludedKeywordFilters")
-	tech := fs.String("tech", "", "techStackFilters, e.g. TypeScript,React")
-	industries := fs.String("industries", "", "industriesFilters")
-	minSalary := fs.Int("min-salary", 170000, "minSalaryFilter (annual USD); jobs without salary still returned")
-	maxPages := fs.Int("max-pages", 6, "page cap per size band (50 jobs/page)")
-	maxJobs := fs.Int("max-jobs", 1000, "stop after this many jobs total (daily quota is 3,000)")
-	out := fs.String("out", "postings-rr.json", "output JSON in jobscan postings format")
+	fs.String("config", "", "config file (defaults below come from boards.remote_rocketship)")
+	titles := fs.String("titles", j(rb.Titles), "jobTitleFilters, comma-separated")
+	locations := fs.String("locations", j(rb.Locations), "locationFilters")
+	seniority := fs.String("seniority", j(rb.Seniority), "entry-level,junior,mid,senior,expert")
+	bands := fs.String("sizes", strings.Join(rb.Sizes, ";"), "companySizeFilters bands separated by ';' (each band is its own request series)")
+	keywords := fs.String("keywords", j(rb.Keywords), "required keywords (AND)")
+	exclude := fs.String("exclude", j(rb.Exclude), "excludedKeywordFilters")
+	tech := fs.String("tech", j(rb.Tech), "techStackFilters, e.g. TypeScript,React")
+	industries := fs.String("industries", j(rb.Industries), "industriesFilters")
+	minSalary := fs.Int("min-salary", rb.MinSalary, "minSalaryFilter (annual USD); jobs without salary still returned")
+	maxPages := fs.Int("max-pages", rb.MaxPages, "page cap per size band (50 jobs/page)")
+	maxJobs := fs.Int("max-jobs", rb.MaxJobs, "stop after this many jobs total (daily quota is 3,000)")
+	out := fs.String("out", rb.Out, "output JSON in jobscan postings format")
 	sandbox := fs.Bool("sandbox", false, "POST to the keyless sandbox and print the raw response, to inspect field shapes")
 	envFile := fs.String("env-file", ".env", "dotenv file to read RR_API_KEY from when it is not in the environment (\"\" to disable)")
 	fs.Parse(args)

@@ -1,9 +1,14 @@
-// jobscan: helpers for the climate-job-search skill.
+// jobscan: helpers for the job-search skill.
 //
+//	jobscan boards [-files]             (boards in the config and their postings files)
 //	jobscan climatebase-url [-sizes 101-250,251-500] [-sectors "A"] [-nonprofit] [-junior]
 //	jobscan fetch-rr [flags]            (needs RR_API_KEY; see rr.go)
-//	jobscan review-batch [-top 30] [-out reviews/batch.json] postings.json [more.json ...]
-//	jobscan score [-config config.yaml] [-out ranked] [-reviews r.json] postings.json [more.json ...]
+//	jobscan review-batch [-top 30] [-out reviews/batch.json] [postings.json ...]
+//	jobscan score [-config f] [-out ranked] [-reviews r.json] [postings.json ...]
+//
+// Every command reads the per-user config (see configPath in boards.go);
+// flag defaults for climatebase-url and fetch-rr come from its boards section.
+// Without postings files, score and review-batch use the enabled boards' files.
 //
 // postings.json: array of {title, company, location, remote, salary_min,
 // salary_max, size, url, source, description}; any field may be missing.
@@ -49,22 +54,26 @@ type Config struct {
 	GrowthTerms  []string `json:"growth_terms" yaml:"growth_terms"`
 	StackTerms   []string `json:"stack_terms" yaml:"stack_terms"`
 	SeniorTerms  []string `json:"senior_terms" yaml:"senior_terms"`
+	// MissionTerms describe the companies or missions the user cares about.
 	// MissionWeight is points per mission term hit (up to 4 hits).
 	MissionWeight int `json:"mission_weight" yaml:"mission_weight"`
 	// NoMissionPenalty is subtracted when a posting matches no mission term.
 	NoMissionPenalty int `json:"no_mission_penalty" yaml:"no_mission_penalty"`
+	// Candidate is the profile the posting-reviewer judges against.
+	Candidate Candidate `json:"candidate" yaml:"candidate"`
+	// Boards picks the job boards to search and their filters.
+	Boards Boards `json:"boards" yaml:"boards"`
 }
 
 func defaultConfig() Config {
 	return Config{
 		SalaryFloor: 170000, SizeMin: 150, SizeMax: 500,
-		ExcludeTerms:  []string{"carbon credit", "carbon offset", "offset marketplace", "carbon marketplace", "credit marketplace", "carbon removal marketplace"},
-		MissionTerms:  []string{"land", "conservation", "forest", "soil", "agricultur", "wildlife", "watershed", "ecosystem", "restoration", "habitat", "regenerative", "biodiversity"},
 		ProductTerms:  []string{"product", "customer", "users", "roadmap", "product manager", "design"},
 		GrowthTerms:   []string{"growth", "marketing", "acquisition", "seo", "experimentation", "funnel"},
 		StackTerms:    []string{"typescript", "react", "node", "postgres", "aws", "performance", "observability", "playwright", "design system", "accessibility", "analytics"},
 		SeniorTerms:   []string{"senior", "staff", "principal", "lead"},
 		MissionWeight: 6, NoMissionPenalty: 0,
+		Boards: defaultBoards(),
 	}
 }
 
@@ -256,18 +265,10 @@ func loadConfig(path string) (Config, error) {
 	if err := dec.Decode(&c); err != nil && err != io.EOF {
 		return c, fmt.Errorf("%s: %w", path, err)
 	}
+	if err := c.checkBoards(); err != nil {
+		return c, fmt.Errorf("%s: %w", path, err)
+	}
 	return c, nil
-}
-
-// configPath returns the -config value, or config.yaml when it exists.
-func configPath(flagVal string) string {
-	if flagVal != "" {
-		return flagVal
-	}
-	if _, err := os.Stat("config.yaml"); err == nil {
-		return "config.yaml"
-	}
-	return ""
 }
 
 func loadJobs(paths []string) ([]Job, error) {
@@ -320,19 +321,20 @@ func mdCell(s string) string {
 
 func runScore(args []string) error {
 	fs := flag.NewFlagSet("score", flag.ExitOnError)
-	cfgPath := fs.String("config", "", "YAML (or JSON) config overriding defaults; default config.yaml if present")
+	cfgPath := fs.String("config", "", "YAML (or JSON) config; default $JOBSCAN_CONFIG, ./config.yaml, then ~/.config/jobscan/config.yaml")
 	out := fs.String("out", "ranked", "output prefix")
 	reviewPaths := fs.String("reviews", "", "comma-separated posting-reviewer JSON files to merge")
 	batchPath := fs.String("batch", "", "review-batch file the reviews were made from; postings in it without a review are listed and written to <batch>-missing.json")
 	fs.Parse(args)
-	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: jobscan score [-config f] [-out prefix] [-reviews a.json,b.json [-batch reviews/batch.json]] postings.json [more.json ...]")
-	}
-	c, err := loadConfig(configPath(*cfgPath))
+	c, _, err := resolveConfig(*cfgPath)
 	if err != nil {
 		return err
 	}
-	jobs, err := loadJobs(fs.Args())
+	files, err := postingArgs(fs, c)
+	if err != nil {
+		return fmt.Errorf("%w\nusage: jobscan score [-config f] [-out prefix] [-reviews a.json,b.json [-batch reviews/batch.json]] [postings.json ...]", err)
+	}
+	jobs, err := loadJobs(files)
 	if err != nil {
 		return err
 	}
@@ -397,20 +399,42 @@ func runScore(args []string) error {
 	return nil
 }
 
+func runClimatebaseURL(args []string) error {
+	c, _, err := resolveConfig(configFlag(args))
+	if err != nil {
+		return err
+	}
+	cb := c.Boards.Climatebase
+	if !cb.Enabled {
+		fmt.Fprintln(os.Stderr, "note: climatebase is disabled in the config")
+	}
+	fs := flag.NewFlagSet("climatebase-url", flag.ExitOnError)
+	fs.String("config", "", "config file (defaults below come from boards.climatebase)")
+	sizes := fs.String("sizes", strings.Join(cb.Sizes, ","), "org size bands, comma-separated")
+	sectors := fs.String("sectors", strings.Join(cb.Sectors, "|"), "sector names, | separated")
+	np := fs.Bool("nonprofit", cb.Nonprofit, "nonprofits only")
+	jr := fs.Bool("junior", false, "junior level")
+	fs.Parse(args)
+	fmt.Println(climatebaseURL(*sizes, *sectors, *np, *jr))
+	return nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: jobscan climatebase-url|fetch-rr|review-batch|score ...")
+		fmt.Fprintln(os.Stderr, "usage: jobscan boards|climatebase-url|fetch-rr|review-batch|score ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
 	case "climatebase-url":
-		fs := flag.NewFlagSet("climatebase-url", flag.ExitOnError)
-		sizes := fs.String("sizes", "101-250,251-500", "org size bands, comma-separated")
-		sectors := fs.String("sectors", "", "sector names, | separated")
-		np := fs.Bool("nonprofit", false, "nonprofits only")
-		jr := fs.Bool("junior", false, "junior level")
-		fs.Parse(os.Args[2:])
-		fmt.Println(climatebaseURL(*sizes, *sectors, *np, *jr))
+		if err := runClimatebaseURL(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case "boards":
+		if err := runBoards(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	case "fetch-rr":
 		if err := runFetchRR(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)

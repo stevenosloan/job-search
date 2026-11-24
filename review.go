@@ -128,19 +128,24 @@ type batchItem struct {
 
 func runReviewBatch(args []string) error {
 	fs := flag.NewFlagSet("review-batch", flag.ExitOnError)
-	cfgPath := fs.String("config", "", "YAML (or JSON) config; default config.yaml if present")
+	cfgPath := fs.String("config", "", "YAML (or JSON) config; see configPath")
 	top := fs.Int("top", 30, "how many of the keyword-ranked postings to include")
 	maxDesc := fs.Int("max-desc", 6000, "truncate descriptions to this many characters (0 = no limit)")
 	out := fs.String("out", "reviews/batch.json", "batch file to write")
 	fs.Parse(args)
-	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: jobscan review-batch [-config f] [-top 30] [-max-desc 6000] [-out reviews/batch.json] postings.json [more.json ...]")
-	}
-	c, err := loadConfig(configPath(*cfgPath))
+	c, cfgUsed, err := resolveConfig(*cfgPath)
 	if err != nil {
 		return err
 	}
-	jobs, err := loadJobs(fs.Args())
+	files, err := postingArgs(fs, c)
+	if err != nil {
+		return fmt.Errorf("%w\nusage: jobscan review-batch [-config f] [-top 30] [-max-desc 6000] [-out reviews/batch.json] [postings.json ...]", err)
+	}
+	crit := filepath.Join(filepath.Dir(*out), "criteria.md")
+	if err := writeCriteria(crit, cfgUsed, c); err != nil {
+		return err
+	}
+	jobs, err := loadJobs(files)
 	if err != nil {
 		return err
 	}
@@ -158,7 +163,7 @@ func runReviewBatch(args []string) error {
 	if err := os.WriteFile(*out, append(b, '\n'), 0o644); err != nil {
 		return err
 	}
-	fmt.Printf("%d postings -> %s\n", len(items), *out)
+	fmt.Printf("%d postings -> %s (criteria: %s)\n", len(items), *out, crit)
 	return nil
 }
 
