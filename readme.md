@@ -159,6 +159,8 @@ Remote Rocketship's terms haven't been checked for storing or sharing its data, 
 go vet ./... && go test ./...
 ```
 
+GitHub Actions (`.github/workflows/test.yml`) runs gofmt, vet, tests and a build on pull requests and pushes to `main`, on Go 1.21 and the current release.
+
 Tests never read your real config or `.env`: `TestMain` points `JOBSCAN_CONFIG` at an empty file, and tests that need an env file use a temporary one.
 
 The project files:
