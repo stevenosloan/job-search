@@ -1,11 +1,11 @@
-package main
-
-// Remote Rocketship API client (POST /api/openclaw/jobs/).
+// Package remoterocketship is the Remote Rocketship board adapter: an API
+// client (POST /api/openclaw/jobs/).
 // Spec: https://www.remoterocketship.com/openapi.json
 // Quota (standard plan): 500 requests or 3,000 jobs per UTC day, whichever first.
 // The key is read from the RR_API_KEY environment variable, or, if that is unset,
 // from RR_API_KEY in a .env file (-env-file). It is never accepted as a flag,
 // logged, or written by this tool.
+package remoterocketship
 
 import (
 	"bytes"
@@ -20,22 +20,82 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"jobscan/boards"
 )
 
+// Config is boards.remote_rocketship in the jobscan config; it sets
+// fetch-rr's flag defaults.
+type Config struct {
+	Enabled    bool     `json:"enabled" yaml:"enabled"`
+	Out        string   `json:"out" yaml:"out"`
+	Titles     []string `json:"titles" yaml:"titles"`
+	Locations  []string `json:"locations" yaml:"locations"`
+	Seniority  []string `json:"seniority" yaml:"seniority"`
+	Sizes      []string `json:"sizes" yaml:"sizes"` // each "min,max" is its own request series
+	Keywords   []string `json:"keywords" yaml:"keywords"`
+	Exclude    []string `json:"exclude" yaml:"exclude"`
+	Tech       []string `json:"tech" yaml:"tech"`
+	Industries []string `json:"industries" yaml:"industries"`
+	MinSalary  int      `json:"min_salary" yaml:"min_salary"`
+	MaxPages   int      `json:"max_pages" yaml:"max_pages"`
+	MaxJobs    int      `json:"max_jobs" yaml:"max_jobs"`
+}
+
+// Default is the board's built-in config.
+func Default() Config {
+	return Config{
+		Enabled: true, Out: "postings-rr.json",
+		Titles:    []string{"Software Engineer", "Frontend Engineer", "Full Stack Engineer"},
+		Locations: []string{"United States"}, Seniority: []string{"senior", "expert"},
+		Sizes:     []string{"51,200", "201,500"},
+		MinSalary: 170000, MaxPages: 6, MaxJobs: 1000,
+	}
+}
+
+// Info summarizes the board for `jobscan boards`.
+func (b Config) Info() boards.Info {
+	return boards.Info{Name: "remote_rocketship", Method: "API (user runs it)", Out: b.Out, Enabled: b.Enabled, Detail: "./jobscan fetch-rr"}
+}
+
 type rrJob struct {
-	ID               json.Number `json:"id"`
-	RoleTitle        string      `json:"roleTitle"`
-	URL              string      `json:"url"`
-	Slug             string      `json:"slug"`
-	RoleDescription  *string     `json:"roleDescription"`
-	RoleRequirements *string     `json:"roleRequirements"`
+	ID               flexID  `json:"id"`
+	RoleTitle        string  `json:"roleTitle"`
+	URL              string  `json:"url"`
+	Slug             string  `json:"slug"`
+	RoleDescription  *string `json:"roleDescription"`
+	RoleRequirements *string `json:"roleRequirements"`
 	Company          *struct {
-		ID   string `json:"id"`
+		ID   flexID `json:"id"`
 		Name string `json:"name"`
 		Slug string `json:"slug"`
 	} `json:"company"`
 	SalaryRange json.RawMessage `json:"salaryRange"`
 }
+
+// flexID accepts a JSON number or string; the live API sends numeric ids
+// where the spec implies strings.
+type flexID string
+
+func (f *flexID) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		*f = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*f = flexID(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("id: %w", err)
+	}
+	*f = flexID(n.String())
+	return nil
+}
+
+func (f flexID) String() string { return string(f) }
 
 type rrResponse struct {
 	JobOpenings []rrJob `json:"jobOpenings"`
@@ -86,16 +146,6 @@ func loadKeyFromDotEnv(path string) error {
 		}
 	}
 	return nil
-}
-
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 var salaryTok = regexp.MustCompile(`(?i)\d[\d,]*\.?\d*\s*k?`)
@@ -155,7 +205,7 @@ func salaryFromRaw(raw json.RawMessage) (lo, hi string) {
 	if !ok {
 		return "", ""
 	}
-	var a, b float64
+	var a, b, usdA, usdB float64
 	period, currency := "", ""
 	var walk func(m map[string]any)
 	walk = func(m map[string]any) {
@@ -168,10 +218,14 @@ func salaryFromRaw(raw json.RawMessage) (lo, hi string) {
 			if s, ok := val.(string); ok {
 				switch {
 				case strings.Contains(key, "currency"):
-					currency = strings.ToUpper(s)
+					// a symbol like "$" is ambiguous (CAD, AUD); only use it when no code is given
+					if !strings.Contains(key, "symbol") || currency == "" {
+						currency = strings.ToUpper(s)
+					}
 					continue
 				case strings.Contains(key, "period") || strings.Contains(key, "interval") ||
-					strings.Contains(key, "unit") || strings.Contains(key, "frequency") || key == "per":
+					strings.Contains(key, "unit") || strings.Contains(key, "frequency") || key == "per" ||
+					strings.HasSuffix(key, "type"):
 					period = strings.ToLower(s)
 					continue
 				}
@@ -181,6 +235,10 @@ func salaryFromRaw(raw json.RawMessage) (lo, hi string) {
 				continue
 			}
 			switch {
+			case strings.Contains(key, "asusd") && strings.Contains(key, "min"):
+				usdA = n
+			case strings.Contains(key, "asusd") && strings.Contains(key, "max"):
+				usdB = n
 			case strings.Contains(key, "min") || strings.Contains(key, "from") || strings.Contains(key, "low"):
 				a = n
 			case strings.Contains(key, "max") || key == "to" || strings.HasSuffix(key, "to") || strings.Contains(key, "high"):
@@ -189,7 +247,10 @@ func salaryFromRaw(raw json.RawMessage) (lo, hi string) {
 		}
 	}
 	walk(obj)
-	if currency != "" && currency != "USD" && currency != "$" {
+	if usdA > 0 || usdB > 0 {
+		// the API's own USD conversion; same pay period as the native amounts
+		a, b = usdA, usdB
+	} else if currency != "" && currency != "USD" && currency != "$" {
 		return "", ""
 	}
 	mult := 1.0
@@ -230,7 +291,7 @@ func salaryShape(raw json.RawMessage) string {
 	return "{" + strings.Join(keys, ",") + "}"
 }
 
-func toJob(j rrJob, sizeLabel string) Job {
+func toJob(j rrJob, sizeLabel string) boards.Job {
 	desc := ""
 	if j.RoleDescription != nil {
 		desc += *j.RoleDescription
@@ -239,7 +300,7 @@ func toJob(j rrJob, sizeLabel string) Job {
 		desc += "\n" + *j.RoleRequirements
 	}
 	lo, hi := salaryFromRaw(j.SalaryRange)
-	job := Job{Title: j.RoleTitle, URL: j.URL, Source: "remoterocketship", Size: sizeLabel,
+	job := boards.Job{Title: j.RoleTitle, URL: j.URL, Source: "remoterocketship", Size: sizeLabel,
 		Description: desc, Remote: true}
 	if j.Company != nil {
 		job.Company = j.Company.Name
@@ -261,20 +322,23 @@ func bandLabel(b string) string {
 	return strings.ReplaceAll(b, ",", "-")
 }
 
-func runFetchRR(args []string) error {
+// Run is `jobscan fetch-rr`: flags default to rb and override it.
+func Run(args []string, rb Config) error {
+	j := func(l []string) string { return strings.Join(l, ",") }
 	fs := flag.NewFlagSet("fetch-rr", flag.ExitOnError)
-	titles := fs.String("titles", "Software Engineer,Frontend Engineer,Full Stack Engineer", "jobTitleFilters, comma-separated")
-	locations := fs.String("locations", "United States", "locationFilters")
-	seniority := fs.String("seniority", "senior,expert", "entry-level,junior,mid,senior,expert")
-	bands := fs.String("sizes", "51,200;201,500", "companySizeFilters bands separated by ';' (each band is its own request series)")
-	keywords := fs.String("keywords", "", "required keywords (AND)")
-	exclude := fs.String("exclude", "carbon credit,carbon offset,carbon marketplace", "excludedKeywordFilters")
-	tech := fs.String("tech", "", "techStackFilters, e.g. TypeScript,React")
-	industries := fs.String("industries", "", "industriesFilters")
-	minSalary := fs.Int("min-salary", 170000, "minSalaryFilter (annual USD); jobs without salary still returned")
-	maxPages := fs.Int("max-pages", 6, "page cap per size band (50 jobs/page)")
-	maxJobs := fs.Int("max-jobs", 1000, "stop after this many jobs total (daily quota is 3,000)")
-	out := fs.String("out", "postings-rr.json", "output JSON in jobscan postings format")
+	fs.String("config", "", "config file (defaults below come from boards.remote_rocketship)")
+	titles := fs.String("titles", j(rb.Titles), "jobTitleFilters, comma-separated")
+	locations := fs.String("locations", j(rb.Locations), "locationFilters")
+	seniority := fs.String("seniority", j(rb.Seniority), "entry-level,junior,mid,senior,expert")
+	bands := fs.String("sizes", strings.Join(rb.Sizes, ";"), "companySizeFilters bands separated by ';' (each band is its own request series)")
+	keywords := fs.String("keywords", j(rb.Keywords), "required keywords (AND)")
+	exclude := fs.String("exclude", j(rb.Exclude), "excludedKeywordFilters")
+	tech := fs.String("tech", j(rb.Tech), "techStackFilters, e.g. TypeScript,React")
+	industries := fs.String("industries", j(rb.Industries), "industriesFilters")
+	minSalary := fs.Int("min-salary", rb.MinSalary, "minSalaryFilter (annual USD); jobs without salary still returned")
+	maxPages := fs.Int("max-pages", rb.MaxPages, "page cap per size band (50 jobs/page)")
+	maxJobs := fs.Int("max-jobs", rb.MaxJobs, "stop after this many jobs total (daily quota is 3,000)")
+	out := fs.String("out", rb.Out, "output JSON in jobscan postings format")
 	sandbox := fs.Bool("sandbox", false, "POST to the keyless sandbox and print the raw response, to inspect field shapes")
 	envFile := fs.String("env-file", ".env", "dotenv file to read RR_API_KEY from when it is not in the environment (\"\" to disable)")
 	fs.Parse(args)
@@ -324,7 +388,7 @@ func runFetchRR(args []string) error {
 		return fmt.Errorf("set RR_API_KEY in the environment or in %s (from your Remote Rocketship account page)", *envFile)
 	}
 
-	var all []Job
+	var all []boards.Job
 	seen := map[string]bool{}
 	requests, jobsReturned := 0, 0
 	remaining := -1                    // X-JobLimit-Remaining, when the server reports it
@@ -343,8 +407,8 @@ func runFetchRR(args []string) error {
 			}
 			filters := map[string]any{
 				"page": page, "itemsPerPage": 50, "sortBy": "DateAdded",
-				"jobTitleFilters": splitList(*titles), "locationFilters": splitList(*locations),
-				"seniorityFilters": splitList(*seniority), "employmentTypeFilters": []string{"full-time"},
+				"jobTitleFilters": boards.SplitList(*titles), "locationFilters": boards.SplitList(*locations),
+				"seniorityFilters": boards.SplitList(*seniority), "employmentTypeFilters": []string{"full-time"},
 				"hideGhostJobsFilter": "true", "showRemoteJobs": true,
 				"minSalaryFilter": *minSalary, "showJobsWithoutSalaryWithMinSalaryFilter": true,
 			}
@@ -353,7 +417,7 @@ func runFetchRR(args []string) error {
 			}
 			for k, v := range map[string]string{"keywordFilters": *keywords, "excludedKeywordFilters": *exclude,
 				"techStackFilters": *tech, "industriesFilters": *industries} {
-				if l := splitList(v); len(l) > 0 {
+				if l := boards.SplitList(v); len(l) > 0 {
 					filters[k] = l
 				}
 			}

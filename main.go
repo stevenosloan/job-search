@@ -1,8 +1,14 @@
-// jobscan: helpers for the climate-job-search skill.
+// jobscan: helpers for the job-search skill.
 //
+//	jobscan boards [-files]             (boards in the config and their postings files)
 //	jobscan climatebase-url [-sizes 101-250,251-500] [-sectors "A"] [-nonprofit] [-junior]
-//	jobscan fetch-rr [flags]            (needs RR_API_KEY; see rr.go)
-//	jobscan score [-config config.json] [-out ranked] postings.json [more.json ...]
+//	jobscan fetch-rr [flags]            (needs RR_API_KEY; see boards/remoterocketship)
+//	jobscan review-batch [-top 30] [-out reviews/batch.json] [postings.json ...]
+//	jobscan score [-config f] [-out ranked] [-reviews r.json] [postings.json ...]
+//
+// Every command reads the per-user config (see configPath in config.go);
+// flag defaults for climatebase-url and fetch-rr come from its boards section.
+// Without postings files, score and review-batch use the enabled boards' files.
 //
 // postings.json: array of {title, company, location, remote, salary_min,
 // salary_max, size, url, source, description}; any field may be missing.
@@ -14,70 +20,17 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net/url"
 	"os"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+
+	"jobscan/boards"
 )
 
-type Job struct {
-	Title       string          `json:"title"`
-	Company     string          `json:"company"`
-	Location    string          `json:"location"`
-	Remote      any             `json:"remote"`
-	SalaryMin   json.RawMessage `json:"salary_min"`
-	SalaryMax   json.RawMessage `json:"salary_max"`
-	Size        string          `json:"size"`
-	URL         string          `json:"url"`
-	Source      string          `json:"source"`
-	Description string          `json:"description"`
-}
-
-type Config struct {
-	SalaryFloor  int      `json:"salary_floor"`
-	SizeMin      int      `json:"size_min"`
-	SizeMax      int      `json:"size_max"`
-	ExcludeTerms []string `json:"exclude_terms"`
-	MissionTerms []string `json:"mission_terms"`
-	ProductTerms []string `json:"product_terms"`
-	GrowthTerms  []string `json:"growth_terms"`
-	StackTerms   []string `json:"stack_terms"`
-	SeniorTerms  []string `json:"senior_terms"`
-}
-
-func defaultConfig() Config {
-	return Config{
-		SalaryFloor: 170000, SizeMin: 150, SizeMax: 500,
-		ExcludeTerms: []string{"carbon credit", "carbon offset", "offset marketplace", "carbon marketplace", "credit marketplace", "carbon removal marketplace"},
-		MissionTerms: []string{"land", "conservation", "forest", "soil", "agricultur", "wildlife", "watershed", "ecosystem", "restoration", "habitat", "regenerative", "biodiversity"},
-		ProductTerms: []string{"product", "customer", "users", "roadmap", "product manager", "design"},
-		GrowthTerms:  []string{"growth", "marketing", "acquisition", "seo", "experimentation", "funnel"},
-		StackTerms:   []string{"typescript", "react", "node", "postgres", "aws", "performance", "observability", "playwright", "design system", "accessibility", "analytics"},
-		SeniorTerms:  []string{"senior", "staff", "principal", "lead"},
-	}
-}
-
-const cbCategories = "Software & IT:Back-end Engineering,DevOps,Front-end Engineering,Full-stack Engineering,Engineering Manager, Software,Software Architecture,Security Engineering"
-
-func climatebaseURL(sizes, sectors string, nonprofit, junior bool) string {
-	level := "Senior Level"
-	if junior {
-		level = "Junior Level"
-	}
-	p := []string{"experience_levels=" + url.QueryEscape(level), "categories=" + url.QueryEscape(cbCategories)}
-	if sectors != "" {
-		p = append(p, "sectors="+url.QueryEscape(sectors))
-	}
-	if sizes != "" {
-		p = append(p, "organization_size="+url.QueryEscape(strings.ReplaceAll(sizes, ",", "|")))
-	}
-	if nonprofit {
-		p = append(p, "organization_type=Nonprofit")
-	}
-	return "https://climatebase.org/jobs?" + strings.Join(p, "&")
-}
+// Job is a posting in the shared postings format (see boards.Job).
+type Job = boards.Job
 
 var numRe = regexp.MustCompile(`\d[\d,]*`)
 
@@ -151,6 +104,7 @@ type Result struct {
 	Score      int
 	Job        Job
 	Why, Flags string
+	Review     *Review // set when a posting-reviewer review matched by URL
 }
 
 // score returns ok=false (with reason in why) when the job is excluded.
@@ -194,9 +148,12 @@ func score(j Job, c Config) (r Result, ok bool, reason string) {
 		flags = append(flags, "size "+j.Size+" outside range")
 	}
 	m := hits(text, c.MissionTerms)
-	pts += min(len(m), 4) * 6
+	pts += min(len(m), 4) * c.MissionWeight
 	if len(m) > 0 {
 		why = append(why, "mission: "+strings.Join(first(m, 4), ", "))
+	} else if c.NoMissionPenalty > 0 {
+		pts -= c.NoMissionPenalty
+		flags = append(flags, "no mission match")
 	}
 	pts += min(len(hits(text, c.ProductTerms)), 3) * 3
 	if g := hits(text, c.GrowthTerms); len(g) > 0 {
@@ -208,48 +165,52 @@ func score(j Job, c Config) (r Result, ok bool, reason string) {
 	if len(s) > 0 {
 		why = append(why, "stack: "+strings.Join(first(s, 5), ", "))
 	}
-	return Result{pts, j, strings.Join(why, "; "), strings.Join(flags, "; ")}, true, ""
+	return Result{Score: pts, Job: j, Why: strings.Join(why, "; "), Flags: strings.Join(flags, "; ")}, true, ""
 }
 
-func runScore(args []string) error {
-	fs := flag.NewFlagSet("score", flag.ExitOnError)
-	cfgPath := fs.String("config", "", "config.json overriding defaults")
-	out := fs.String("out", "ranked", "output prefix")
-	fs.Parse(args)
-	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: jobscan score [-config f] [-out prefix] postings.json [more.json ...]")
+// companyKey normalizes a company name for dedupe, so "Afresh" and
+// "Afresh Technologies, Inc." collapse to the same key.
+func companyKey(name string) string {
+	k := strings.ToLower(strings.TrimSpace(name))
+	k = strings.NewReplacer(",", " ", ".", " ").Replace(k)
+	words := strings.Fields(k)
+	suffix := map[string]bool{"inc": true, "llc": true, "ltd": true, "corp": true, "corporation": true,
+		"co": true, "company": true, "technologies": true, "technology": true, "gmbh": true, "pbc": true}
+	for len(words) > 1 && suffix[words[len(words)-1]] {
+		words = words[:len(words)-1]
 	}
-	c := defaultConfig()
-	if *cfgPath != "" {
-		b, err := os.ReadFile(*cfgPath)
-		if err != nil {
-			return err
-		}
-		if err := json.Unmarshal(b, &c); err != nil { // missing keys keep defaults
-			return err
-		}
-	}
+	return strings.Join(words, " ")
+}
+
+func loadJobs(paths []string) ([]Job, error) {
 	var jobs []Job
-	for _, path := range fs.Args() {
+	for _, path := range paths {
 		b, err := os.ReadFile(path)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		var part []Job
 		if err := json.Unmarshal(b, &part); err != nil {
-			return fmt.Errorf("%s: %w", path, err)
+			return nil, fmt.Errorf("%s: %w", path, err)
 		}
 		jobs = append(jobs, part...)
 	}
+	return jobs, nil
+}
+
+type droppedJob struct {
+	J   Job
+	Why string
+}
+
+// rankJobs dedupes on normalized company + title (first file wins), drops
+// exclusions, and sorts by keyword score.
+func rankJobs(jobs []Job, c Config) ([]Result, []droppedJob) {
 	seen := map[string]bool{}
 	var ranked []Result
-	type drop struct {
-		J   Job
-		Why string
-	}
-	var dropped []drop
+	var drops []droppedJob
 	for _, j := range jobs {
-		key := strings.ToLower(j.Company) + "|" + strings.ToLower(j.Title)
+		key := companyKey(j.Company) + "|" + strings.ToLower(strings.TrimSpace(j.Title))
 		if seen[key] {
 			continue
 		}
@@ -257,10 +218,52 @@ func runScore(args []string) error {
 		if r, ok, why := score(j, c); ok {
 			ranked = append(ranked, r)
 		} else {
-			dropped = append(dropped, drop{j, why})
+			drops = append(drops, droppedJob{j, why})
 		}
 	}
 	sort.SliceStable(ranked, func(a, b int) bool { return ranked[a].Score > ranked[b].Score })
+	return ranked, drops
+}
+
+// mdCell keeps a value from breaking a Markdown table row.
+func mdCell(s string) string {
+	return strings.NewReplacer("|", "/", "\n", " ").Replace(s)
+}
+
+func runScore(args []string) error {
+	fs := flag.NewFlagSet("score", flag.ExitOnError)
+	cfgPath := fs.String("config", "", "YAML (or JSON) config; default $JOBSCAN_CONFIG, ./config.yaml, then ~/.config/jobscan/config.yaml")
+	out := fs.String("out", "ranked", "output prefix")
+	reviewPaths := fs.String("reviews", "", "comma-separated posting-reviewer JSON files to merge")
+	batchPath := fs.String("batch", "", "review-batch file the reviews were made from; postings in it without a review are listed and written to <batch>-missing.json")
+	fs.Parse(args)
+	c, _, err := resolveConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	files, err := postingArgs(fs, c)
+	if err != nil {
+		return fmt.Errorf("%w\nusage: jobscan score [-config f] [-out prefix] [-reviews a.json,b.json [-batch reviews/batch.json]] [postings.json ...]", err)
+	}
+	jobs, err := loadJobs(files)
+	if err != nil {
+		return err
+	}
+	ranked, dropped := rankJobs(jobs, c)
+	if *reviewPaths != "" {
+		reviews, err := loadReviews(strings.Split(*reviewPaths, ","))
+		if err != nil {
+			return err
+		}
+		ranked = applyReviews(ranked, reviews)
+		if *batchPath != "" {
+			if err := checkBatchCoverage(*batchPath, reviews); err != nil {
+				return err
+			}
+		}
+	} else if *batchPath != "" {
+		return fmt.Errorf("-batch needs -reviews")
+	}
 
 	cf, err := os.Create(*out + ".csv")
 	if err != nil {
@@ -268,23 +271,31 @@ func runScore(args []string) error {
 	}
 	defer cf.Close()
 	w := csv.NewWriter(cf)
-	w.Write([]string{"score", "title", "company", "size", "salary", "location", "source", "url", "why", "flags"})
+	w.Write([]string{"fit", "score", "title", "company", "size", "salary", "location", "source", "url", "why", "flags", "mission_tier", "role_type", "review"})
 	for _, r := range ranked {
 		j := r.Job
-		w.Write([]string{strconv.Itoa(r.Score), j.Title, j.Company, j.Size,
+		fit, tier, role, note := "", "", "", ""
+		if rv := r.Review; rv != nil {
+			fit, tier, role, note = strconv.Itoa(rv.Fit), strconv.Itoa(rv.MissionTier), rv.RoleType, rv.note()
+		}
+		w.Write([]string{fit, strconv.Itoa(r.Score), j.Title, j.Company, j.Size,
 			rawStr(j.SalaryMin) + "-" + rawStr(j.SalaryMax),
-			j.Location, j.Source, j.URL, r.Why, r.Flags})
+			j.Location, j.Source, j.URL, r.Why, r.Flags, tier, role, note})
 	}
 	w.Flush()
 
 	var sb strings.Builder
-	sb.WriteString("| # | Score | Role | Company | Why | Flags |\n|---|---|---|---|---|---|\n")
+	sb.WriteString("| # | Fit | Score | Role | Company | Why | Flags |\n|---|---|---|---|---|---|---|\n")
 	for i, r := range ranked {
 		t := r.Job.Title
 		if r.Job.URL != "" {
 			t = fmt.Sprintf("[%s](%s)", t, r.Job.URL)
 		}
-		fmt.Fprintf(&sb, "| %d | %d | %s | %s | %s | %s |\n", i+1, r.Score, t, r.Job.Company, r.Why, r.Flags)
+		fit, why := "", r.Why
+		if rv := r.Review; rv != nil {
+			fit, why = strconv.Itoa(rv.Fit), rv.note()
+		}
+		fmt.Fprintf(&sb, "| %d | %s | %d | %s | %s | %s | %s |\n", i+1, fit, r.Score, t, r.Job.Company, mdCell(why), mdCell(r.Flags))
 	}
 	if len(dropped) > 0 {
 		sb.WriteString("\nExcluded:\n")
@@ -301,20 +312,27 @@ func runScore(args []string) error {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: jobscan climatebase-url|fetch-rr|score ...")
+		fmt.Fprintln(os.Stderr, "usage: jobscan boards|climatebase-url|fetch-rr|review-batch|score ...")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
 	case "climatebase-url":
-		fs := flag.NewFlagSet("climatebase-url", flag.ExitOnError)
-		sizes := fs.String("sizes", "101-250,251-500", "org size bands, comma-separated")
-		sectors := fs.String("sectors", "", "sector names, | separated")
-		np := fs.Bool("nonprofit", false, "nonprofits only")
-		jr := fs.Bool("junior", false, "junior level")
-		fs.Parse(os.Args[2:])
-		fmt.Println(climatebaseURL(*sizes, *sectors, *np, *jr))
+		if err := runClimatebaseURL(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case "boards":
+		if err := runBoards(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
 	case "fetch-rr":
 		if err := runFetchRR(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+	case "review-batch":
+		if err := runReviewBatch(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			os.Exit(1)
 		}
